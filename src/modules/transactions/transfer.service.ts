@@ -258,14 +258,15 @@ export async function createTransfer(
       ledgerEntries.push(insertedLedgerRow.rows[0]);
     }
 
-    const completedTransactionResult = await client.query<TransferTransactionRow>(
-      `UPDATE transactions
+    const completedTransactionResult =
+      await client.query<TransferTransactionRow>(
+        `UPDATE transactions
        SET status = 'COMPLETED',
            completed_at = now()
        WHERE id = $1
        RETURNING id, source_account_id, destination_account_id, amount, currency, status, failure_reason, created_at, completed_at`,
-      [transactionId]
-    );
+        [transactionId]
+      );
 
     await client.query(
       `UPDATE idempotency_keys
@@ -296,7 +297,8 @@ export async function createTransfer(
 
     return {
       replayed: false,
-      transaction: completedTransactionResult.rows[0] ?? transactionResult.rows[0],
+      transaction:
+        completedTransactionResult.rows[0] ?? transactionResult.rows[0],
       ledgerEntries,
     };
   });
