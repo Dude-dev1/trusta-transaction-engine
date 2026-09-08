@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
