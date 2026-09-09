@@ -85,7 +85,7 @@ describeDb("transfer service", () => {
     await query(
       `INSERT INTO users (id, email, password_hash, status)
        VALUES ($1, $2, $3, 'ACTIVE')`,
-      [userId, "alice@example.com", "hash"]
+      [userId, "kojo@example.com", "hash"]
     );
 
     await query(
