@@ -4,7 +4,7 @@ export interface TransferHashInput {
   userId: string;
   sourceAccountId: string;
   destinationAccountId: string;
-  amountMinor: number;
+  amountMinor: bigint;
   currency: string;
 }
 
@@ -14,7 +14,11 @@ export function hashTransferRequest(input: TransferHashInput): string {
     userId: input.userId,
     sourceAccountId: input.sourceAccountId,
     destinationAccountId: input.destinationAccountId,
-    amountMinor: input.amountMinor,
+
+    // BigInt cannot be serialized directly by JSON.stringify.
+    // Convert it to its canonical decimal representation.
+    amountMinor: input.amountMinor.toString(),
+
     currency: input.currency,
   });
 
