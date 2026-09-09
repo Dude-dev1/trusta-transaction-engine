@@ -8,7 +8,7 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
-    "migrate": "psql \"$DATABASE_URL\" -f src/database/migrations/001_init.sql && psql \"$DATABASE_URL\" -f src/database/migrations/002_ledger_immutable.sql && psql \"$DATABASE_URL\" -f src/database/migrations/003_double_entry_integrity.sql && psql \"$DATABASE_URL\" -f src/database/migrations/004_transaction_account_consistency.sql && psql \"$DATABASE_URL\" -f src/database/migrations/005_audit_logs_immutable.sql",
+    "migrate": "node scripts/migrate.js",
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
