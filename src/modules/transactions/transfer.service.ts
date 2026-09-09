@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
+
 import { withTransaction } from "../../database/client.js";
+
 import {
   ConflictError,
   ForbiddenError,
   NotFoundError,
   UnprocessableEntityError,
 } from "../../utils/errors.js";
+
 import { hashTransferRequest } from "../../utils/request-hash.js";
+
 import type {
   TransferExecutionInput,
   TransferLedgerEntry,
@@ -31,22 +35,50 @@ interface LockableAccountRow {
   status: "ACTIVE" | "SUSPENDED" | "DISABLED";
 }
 
+/**
+ * Locks both accounts in deterministic UUID order.
+ *
+ * This is deliberately implemented as two separate SELECT ... FOR UPDATE
+ * statements rather than relying on ORDER BY together with FOR UPDATE.
+ *
+ * Every transfer therefore acquires account locks in exactly the same order:
+ *
+ *   smaller UUID -> larger UUID
+ *
+ * This reduces the possibility of deadlocks when two transfers involve the
+ * same pair of accounts in opposite directions.
+ */
 async function loadLockedAccounts(
   client: PoolClient,
   sourceAccountId: string,
   destinationAccountId: string
 ): Promise<Map<string, LockableAccountRow>> {
   const ids = [sourceAccountId, destinationAccountId].sort();
-  const result = await client.query<LockableAccountRow>(
-    `SELECT id, user_id, currency, balance, status
-     FROM accounts
-     WHERE id = ANY($1::uuid[])
-     ORDER BY id
-     FOR UPDATE`,
-    [ids]
-  );
 
-  return new Map(result.rows.map((row) => [row.id, row]));
+  const accounts = new Map<string, LockableAccountRow>();
+
+  for (const accountId of ids) {
+    const result = await client.query<LockableAccountRow>(
+      `SELECT
+         id,
+         user_id,
+         currency,
+         balance,
+         status
+       FROM accounts
+       WHERE id = $1
+       FOR UPDATE`,
+      [accountId]
+    );
+
+    const account = result.rows[0];
+
+    if (account) {
+      accounts.set(account.id, account);
+    }
+  }
+
+  return accounts;
 }
 
 async function loadTransactionResult(
@@ -57,26 +89,52 @@ async function loadTransactionResult(
   ledgerEntries: TransferLedgerEntry[];
 }> {
   const transactionRows = await client.query<TransferTransactionRow>(
-    `SELECT id, source_account_id, destination_account_id, amount, currency, status, failure_reason, created_at, completed_at
+    `SELECT
+       id,
+       source_account_id,
+       destination_account_id,
+       amount,
+       currency,
+       status,
+       failure_reason,
+       created_at,
+       completed_at
      FROM transactions
      WHERE id = $1`,
     [transactionId]
   );
 
   const ledgerRows = await client.query<TransferLedgerEntry>(
-    `SELECT id, transaction_id, account_id, amount, entry_type, created_at
-     FROM ledger_entries
-     WHERE transaction_id = $1
-     ORDER BY created_at, id`,
+    `SELECT
+     id,
+     transaction_id,
+     account_id,
+     amount,
+     entry_type,
+     created_at
+   FROM ledger_entries
+   WHERE transaction_id = $1
+   ORDER BY
+     created_at,
+     CASE entry_type
+       WHEN 'DEBIT' THEN 0
+       WHEN 'CREDIT' THEN 1
+       ELSE 2
+     END,
+     id`,
     [transactionId]
   );
 
   const transaction = transactionRows.rows[0];
+
   if (!transaction) {
     throw new NotFoundError("Transaction record was not found.");
   }
 
-  return { transaction, ledgerEntries: ledgerRows.rows };
+  return {
+    transaction,
+    ledgerEntries: ledgerRows.rows,
+  };
 }
 
 async function reserveIdempotencyKey(
@@ -84,33 +142,72 @@ async function reserveIdempotencyKey(
   userId: string,
   idempotencyKey: string,
   requestHash: string
-): Promise<{ inserted: boolean; record: IdempotencyRow }> {
+): Promise<{
+  inserted: boolean;
+  record: IdempotencyRow;
+}> {
   const insertResult = await client.query<IdempotencyRow>(
-    `INSERT INTO idempotency_keys (key, user_id, request_hash, status)
+    `INSERT INTO idempotency_keys (
+       key,
+       user_id,
+       request_hash,
+       status
+     )
      VALUES ($1, $2, $3, 'PENDING')
      ON CONFLICT (user_id, key) DO NOTHING
-     RETURNING key, user_id, request_hash, transaction_id, status`,
+     RETURNING
+       key,
+       user_id,
+       request_hash,
+       transaction_id,
+       status`,
     [idempotencyKey, userId, requestHash]
   );
 
   if (insertResult.rowCount === 1) {
-    return { inserted: true, record: insertResult.rows[0] };
+    return {
+      inserted: true,
+      record: insertResult.rows[0],
+    };
   }
 
+  /*
+   * The conflicting idempotency row may currently be owned by another
+   * transaction. FOR UPDATE makes a concurrent request wait until that
+   * transaction finishes.
+   *
+   * Once the lock is acquired, this request sees the committed state and
+   * can safely replay the completed transaction.
+   */
   const rowResult = await client.query<IdempotencyRow>(
-    `SELECT key, user_id, request_hash, transaction_id, status
+    `SELECT
+       key,
+       user_id,
+       request_hash,
+       transaction_id,
+       status
      FROM idempotency_keys
-     WHERE user_id = $1 AND key = $2
+     WHERE user_id = $1
+       AND key = $2
      FOR UPDATE`,
     [userId, idempotencyKey]
   );
 
   const record = rowResult.rows[0];
+
+  /*
+   * This should only be reachable in an unusual concurrent visibility
+   * situation. Retry the reservation lookup rather than proceeding without
+   * an idempotency record.
+   */
   if (!record) {
     return reserveIdempotencyKey(client, userId, idempotencyKey, requestHash);
   }
 
-  return { inserted: false, record };
+  return {
+    inserted: false,
+    record,
+  };
 }
 
 export async function createTransfer(
@@ -119,6 +216,12 @@ export async function createTransfer(
   const requestHash = hashTransferRequest(input);
 
   return withTransaction(async (client) => {
+    /*
+     * Reserve the idempotency key before performing financial mutations.
+     *
+     * Because this occurs inside the same PostgreSQL transaction, a failed
+     * transfer rolls the reservation back as well.
+     */
     const idempotency = await reserveIdempotencyKey(
       client,
       input.userId,
@@ -138,19 +241,43 @@ export async function createTransfer(
           client,
           idempotency.record.transaction_id
         );
+
         return {
           replayed: true,
           transaction: replay.transaction,
           ledgerEntries: replay.ledgerEntries,
         };
       }
+
+      /*
+       * If the existing record is still PENDING, the FOR UPDATE above has
+       * synchronized us with the transaction that owns it.
+       *
+       * A persisted PENDING row without a transaction_id indicates that the
+       * owning transaction did not complete or failed to set the result back.
+       * That state must not be treated as reusable or retryable. Reject it
+       * explicitly rather than proceeding with a second transfer.
+       */
+      if (!idempotency.record.transaction_id) {
+        throw new ConflictError(
+          "This idempotency key is currently in progress and cannot be retried yet."
+        );
+      }
     }
 
+    /*
+     * CRITICAL CONCURRENCY BOUNDARY:
+     *
+     * Account rows are locked before their balances are read.
+     *
+     * loadLockedAccounts() always acquires locks in deterministic UUID order.
+     */
     const accounts = await loadLockedAccounts(
       client,
       input.sourceAccountId,
       input.destinationAccountId
     );
+
     const sourceAccount = accounts.get(input.sourceAccountId);
     const destinationAccount = accounts.get(input.destinationAccountId);
 
@@ -184,7 +311,13 @@ export async function createTransfer(
       );
     }
 
-    const sourceBalance = Number(sourceAccount.balance);
+    /*
+     * PostgreSQL BIGINT is returned by node-postgres as a string.
+     *
+     * Convert to bigint before performing financial arithmetic.
+     */
+    const sourceBalance = BigInt(sourceAccount.balance);
+
     if (sourceBalance < input.amountMinor) {
       throw new UnprocessableEntityError(
         "The source account does not have sufficient balance."
@@ -192,11 +325,27 @@ export async function createTransfer(
     }
 
     const transactionId = randomUUID();
+
     const transactionResult = await client.query<TransferTransactionRow>(
       `INSERT INTO transactions (
-         id, source_account_id, destination_account_id, amount, currency, status
-       ) VALUES ($1, $2, $3, $4, $5, 'PENDING')
-       RETURNING id, source_account_id, destination_account_id, amount, currency, status, failure_reason, created_at, completed_at`,
+         id,
+         source_account_id,
+         destination_account_id,
+         amount,
+         currency,
+         status
+       )
+       VALUES ($1, $2, $3, $4, $5, 'PENDING')
+       RETURNING
+         id,
+         source_account_id,
+         destination_account_id,
+         amount,
+         currency,
+         status,
+         failure_reason,
+         created_at,
+         completed_at`,
       [
         transactionId,
         input.sourceAccountId,
@@ -206,6 +355,10 @@ export async function createTransfer(
       ]
     );
 
+    /*
+     * Both account mutations happen inside the same PostgreSQL transaction
+     * and both rows are already locked.
+     */
     await client.query(
       `UPDATE accounts
        SET balance = balance - $1,
@@ -243,9 +396,21 @@ export async function createTransfer(
 
     for (const ledgerEntry of ledgerEntriesToInsert) {
       const insertedLedgerRow = await client.query<TransferLedgerEntry>(
-        `INSERT INTO ledger_entries (id, transaction_id, account_id, amount, entry_type)
+        `INSERT INTO ledger_entries (
+           id,
+           transaction_id,
+           account_id,
+           amount,
+           entry_type
+         )
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, transaction_id, account_id, amount, entry_type, created_at`,
+         RETURNING
+           id,
+           transaction_id,
+           account_id,
+           amount,
+           entry_type,
+           created_at`,
         [
           ledgerEntry.id,
           ledgerEntry.transaction_id,
@@ -261,10 +426,19 @@ export async function createTransfer(
     const completedTransactionResult =
       await client.query<TransferTransactionRow>(
         `UPDATE transactions
-       SET status = 'COMPLETED',
-           completed_at = now()
-       WHERE id = $1
-       RETURNING id, source_account_id, destination_account_id, amount, currency, status, failure_reason, created_at, completed_at`,
+         SET status = 'COMPLETED',
+             completed_at = now()
+         WHERE id = $1
+         RETURNING
+           id,
+           source_account_id,
+           destination_account_id,
+           amount,
+           currency,
+           status,
+           failure_reason,
+           created_at,
+           completed_at`,
         [transactionId]
       );
 
@@ -272,12 +446,19 @@ export async function createTransfer(
       `UPDATE idempotency_keys
        SET status = 'COMPLETED',
            transaction_id = $1
-       WHERE user_id = $2 AND key = $3`,
+       WHERE user_id = $2
+         AND key = $3`,
       [transactionId, input.userId, input.idempotencyKey]
     );
 
     await client.query(
-      `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, metadata)
+      `INSERT INTO audit_logs (
+         user_id,
+         action,
+         resource_type,
+         resource_id,
+         metadata
+       )
        VALUES ($1, $2, $3, $4, $5::jsonb)`,
       [
         input.userId,
@@ -287,7 +468,7 @@ export async function createTransfer(
         JSON.stringify({
           requestId: input.requestId,
           idempotencyKey: input.idempotencyKey,
-          amountMinor: input.amountMinor,
+          amountMinor: input.amountMinor.toString(),
           currency: input.currency,
           sourceAccountId: input.sourceAccountId,
           destinationAccountId: input.destinationAccountId,
