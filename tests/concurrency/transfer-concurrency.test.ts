@@ -120,10 +120,10 @@ describeDb("transfer concurrency", () => {
          ($4, $5, $6, 'ACTIVE')`,
       [
         userOneId,
-        "alice@example.com",
+        "kojo@example.com",
         "hash-one",
         userTwoId,
-        "bob@example.com",
+        "kofi@example.com",
         "hash-two",
       ]
     );
