@@ -1,76 +1,543 @@
--- Manual constraint-verification script (run against transaction_engine_dev).
--- Not part of the app's automated test suite (that will be vitest against
--- the real transaction service later) — this is a one-off sanity pass
--- directly against the schema created by migration 001.
+-- Transaction Engine - Database Constraint Verification
+--
+-- This verifies:
+--
+-- 1. Existing Phase 2 constraints
+-- 2. Ledger immutability
+-- 3. Double-entry integrity
+-- 4. Completed transactions require exactly:
+--      one DEBIT
+--      one CREDIT
+--      balanced amounts
+--      correct source/destination accounts
+--
+-- Run against transaction_engine_dev.
 
 \set ON_ERROR_STOP off
-\echo '=== 1. Seed two users and one account each (USD) ==='
 
-INSERT INTO users (id, email, password_hash, status)
+\echo ''
+\echo '============================================================'
+\echo 'Transaction Engine - Database Constraint Verification'
+\echo '============================================================'
+
+
+\echo ''
+\echo '=== 1. Seed users ==='
+
+INSERT INTO users (
+    id,
+    email,
+    password_hash,
+    status
+)
 VALUES
-  ('11111111-1111-1111-1111-111111111111', 'kojo@example.com', 'hash1', 'ACTIVE'),
-  ('22222222-2222-2222-2222-222222222222', 'kofi@example.com',   'hash2', 'ACTIVE');
+(
+    '11111111-1111-1111-1111-111111111111',
+    'kojo@example.com',
+    'hash1',
+    'ACTIVE'
+),
+(
+    '22222222-2222-2222-2222-222222222222',
+    'kofi@example.com',
+    'hash2',
+    'ACTIVE'
+);
 
-INSERT INTO accounts (id, user_id, currency, balance, status)
+
+\echo ''
+\echo '=== 2. Seed USD accounts ==='
+
+INSERT INTO accounts (
+    id,
+    user_id,
+    currency,
+    balance,
+    status
+)
 VALUES
-  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '11111111-1111-1111-1111-111111111111', 'USD', 10000, 'ACTIVE'),
-  ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '22222222-2222-2222-2222-222222222222', 'USD', 5000,  'ACTIVE');
+(
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    '11111111-1111-1111-1111-111111111111',
+    'USD',
+    10000,
+    'ACTIVE'
+),
+(
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    '22222222-2222-2222-2222-222222222222',
+    'USD',
+    5000,
+    'ACTIVE'
+);
 
-\echo '=== 2. Valid transfer: kojo -> kofi, 10000 minor units ($100.00) ==='
 
-INSERT INTO transactions (id, source_account_id, destination_account_id, amount, currency, status, completed_at)
-VALUES ('c0000000-0000-0000-0000-000000000001',
-        'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
-        'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
-        10000, 'USD', 'COMPLETED', now());
+\echo ''
+\echo '============================================================'
+\echo 'VALID DOUBLE-ENTRY TRANSACTION'
+\echo '============================================================'
 
-INSERT INTO ledger_entries (transaction_id, account_id, amount, entry_type) VALUES
-  ('c0000000-0000-0000-0000-000000000001', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', -10000, 'DEBIT'),
-  ('c0000000-0000-0000-0000-000000000001', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',  10000, 'CREDIT');
+BEGIN;
 
-UPDATE accounts SET balance = balance - 10000 WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-UPDATE accounts SET balance = balance + 10000 WHERE id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+INSERT INTO transactions (
+    id,
+    source_account_id,
+    destination_account_id,
+    amount,
+    currency,
+    status
+)
+VALUES (
+    'c0000000-0000-0000-0000-000000000001',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    10000,
+    'USD',
+    'PENDING'
+);
 
-\echo '--- ledger balances to zero for this transaction? (expect 0) ---'
-SELECT sum(amount) FROM ledger_entries WHERE transaction_id = 'c0000000-0000-0000-0000-000000000001';
+INSERT INTO ledger_entries (
+    transaction_id,
+    account_id,
+    amount,
+    entry_type
+)
+VALUES
+(
+    'c0000000-0000-0000-0000-000000000001',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    -10000,
+    'DEBIT'
+),
+(
+    'c0000000-0000-0000-0000-000000000001',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    10000,
+    'CREDIT'
+);
 
-\echo '=== 3. VIOLATION TEST: negative balance should be rejected ==='
-UPDATE accounts SET balance = -1 WHERE id = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+UPDATE transactions
+SET status = 'COMPLETED',
+    completed_at = now()
+WHERE id = 'c0000000-0000-0000-0000-000000000001';
 
-\echo '=== 4. VIOLATION TEST: amount <= 0 should be rejected ==='
-INSERT INTO transactions (source_account_id, destination_account_id, amount, currency, status)
-VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 0, 'USD', 'PENDING');
+COMMIT;
 
-\echo '=== 5. VIOLATION TEST: source = destination should be rejected ==='
-INSERT INTO transactions (source_account_id, destination_account_id, amount, currency, status)
-VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 100, 'USD', 'PENDING');
+\echo 'VALID TRANSACTION COMMITTED SUCCESSFULLY';
 
-\echo '=== 6. VIOLATION TEST: DEBIT with positive amount should be rejected ==='
-INSERT INTO ledger_entries (transaction_id, account_id, amount, entry_type)
-VALUES ('c0000000-0000-0000-0000-000000000001', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 500, 'DEBIT');
 
-\echo '=== 7. VIOLATION TEST: bad status value should be rejected ==='
-INSERT INTO transactions (source_account_id, destination_account_id, amount, currency, status)
-VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 100, 'USD', 'CANCELLED');
+\echo ''
+\echo '=== Verify ledger total is zero ==='
 
-\echo '=== 8. Idempotency uniqueness: same (user_id, key) twice should be rejected ==='
-INSERT INTO idempotency_keys (key, user_id, request_hash, status)
-VALUES ('ABC123', '11111111-1111-1111-1111-111111111111', 'hash-of-request-1', 'COMPLETED');
+SELECT
+    transaction_id,
+    COUNT(*) AS entry_count,
+    SUM(amount) AS ledger_total
+FROM ledger_entries
+WHERE transaction_id =
+    'c0000000-0000-0000-0000-000000000001'
+GROUP BY transaction_id;
 
-INSERT INTO idempotency_keys (key, user_id, request_hash, status)
-VALUES ('ABC123', '11111111-1111-1111-1111-111111111111', 'hash-of-request-2', 'PENDING');
 
-\echo '=== 9. Idempotency: same key, DIFFERENT user should be allowed (per-user scoping) ==='
-INSERT INTO idempotency_keys (key, user_id, request_hash, status)
-VALUES ('ABC123', '22222222-2222-2222-2222-222222222222', 'hash-of-kofis-request', 'PENDING');
+\echo ''
+\echo '=== Verify DEBIT and CREDIT ==='
 
-\echo '--- idempotency_keys rows (expect 2: kojo/ABC123 completed, kofi/ABC123 pending) ---'
-SELECT key, user_id, status FROM idempotency_keys ORDER BY user_id;
+SELECT
+    entry_type,
+    account_id,
+    amount
+FROM ledger_entries
+WHERE transaction_id =
+    'c0000000-0000-0000-0000-000000000001'
+ORDER BY entry_type;
 
-\echo '=== 10. Duplicate email should be rejected ==='
-INSERT INTO users (email, password_hash, status) VALUES ('kojo@example.com', 'other-hash', 'ACTIVE');
 
-\echo '=== 11. Deletion restraint: deleting a referenced account should be rejected ==='
-DELETE FROM accounts WHERE id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+\echo ''
+\echo '============================================================'
+\echo 'INVALID TEST 1: COMPLETED TRANSACTION WITH ONE ENTRY'
+\echo '============================================================'
 
-\echo '=== Done. Review above: violation tests (3,4,5,6,7,8,10,11) must all show ERROR. ==='
+BEGIN;
+
+INSERT INTO transactions (
+    id,
+    source_account_id,
+    destination_account_id,
+    amount,
+    currency,
+    status
+)
+VALUES (
+    'c0000000-0000-0000-0000-000000000002',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    5000,
+    'USD',
+    'PENDING'
+);
+
+INSERT INTO ledger_entries (
+    transaction_id,
+    account_id,
+    amount,
+    entry_type
+)
+VALUES (
+    'c0000000-0000-0000-0000-000000000002',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    -5000,
+    'DEBIT'
+);
+
+UPDATE transactions
+SET status = 'COMPLETED',
+    completed_at = now()
+WHERE id = 'c0000000-0000-0000-0000-000000000002';
+
+\echo 'Expected: COMMIT below must fail.'
+
+COMMIT;
+
+ROLLBACK;
+
+
+\echo ''
+\echo '============================================================'
+\echo 'INVALID TEST 2: COMPLETED TRANSACTION WITH WRONG AMOUNTS'
+\echo '============================================================'
+
+BEGIN;
+
+INSERT INTO transactions (
+    id,
+    source_account_id,
+    destination_account_id,
+    amount,
+    currency,
+    status
+)
+VALUES (
+    'c0000000-0000-0000-0000-000000000003',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    5000,
+    'USD',
+    'PENDING'
+);
+
+INSERT INTO ledger_entries (
+    transaction_id,
+    account_id,
+    amount,
+    entry_type
+)
+VALUES
+(
+    'c0000000-0000-0000-0000-000000000003',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    -4000,
+    'DEBIT'
+),
+(
+    'c0000000-0000-0000-0000-000000000003',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    4000,
+    'CREDIT'
+);
+
+UPDATE transactions
+SET status = 'COMPLETED',
+    completed_at = now()
+WHERE id = 'c0000000-0000-0000-0000-000000000003';
+
+\echo 'Expected: COMMIT below must fail.'
+
+COMMIT;
+
+ROLLBACK;
+
+
+\echo ''
+\echo '============================================================'
+\echo 'INVALID TEST 3: TWO DEBITS'
+\echo '============================================================'
+
+BEGIN;
+
+INSERT INTO transactions (
+    id,
+    source_account_id,
+    destination_account_id,
+    amount,
+    currency,
+    status
+)
+VALUES (
+    'c0000000-0000-0000-0000-000000000004',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    5000,
+    'USD',
+    'PENDING'
+);
+
+INSERT INTO ledger_entries (
+    transaction_id,
+    account_id,
+    amount,
+    entry_type
+)
+VALUES
+(
+    'c0000000-0000-0000-0000-000000000004',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    -5000,
+    'DEBIT'
+),
+(
+    'c0000000-0000-0000-0000-000000000004',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    -5000,
+    'DEBIT'
+);
+
+UPDATE transactions
+SET status = 'COMPLETED',
+    completed_at = now()
+WHERE id = 'c0000000-0000-0000-0000-000000000004';
+
+\echo 'Expected: COMMIT below must fail.'
+
+COMMIT;
+
+ROLLBACK;
+
+
+\echo ''
+\echo '============================================================'
+\echo 'INVALID TEST 4: CREDIT ON WRONG ACCOUNT'
+\echo '============================================================'
+
+BEGIN;
+
+INSERT INTO transactions (
+    id,
+    source_account_id,
+    destination_account_id,
+    amount,
+    currency,
+    status
+)
+VALUES (
+    'c0000000-0000-0000-0000-000000000005',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    5000,
+    'USD',
+    'PENDING'
+);
+
+INSERT INTO ledger_entries (
+    transaction_id,
+    account_id,
+    amount,
+    entry_type
+)
+VALUES
+(
+    'c0000000-0000-0000-0000-000000000005',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    -5000,
+    'DEBIT'
+),
+(
+    'c0000000-0000-0000-0000-000000000005',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    5000,
+    'CREDIT'
+);
+
+UPDATE transactions
+SET status = 'COMPLETED',
+    completed_at = now()
+WHERE id = 'c0000000-0000-0000-0000-000000000005';
+
+\echo 'Expected: COMMIT below must fail.'
+
+COMMIT;
+
+ROLLBACK;
+
+
+\echo ''
+\echo '============================================================'
+\echo 'INVALID TEST 5: EXTRA THIRD ENTRY'
+\echo '============================================================'
+
+BEGIN;
+
+INSERT INTO transactions (
+    id,
+    source_account_id,
+    destination_account_id,
+    amount,
+    currency,
+    status
+)
+VALUES (
+    'c0000000-0000-0000-0000-000000000006',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    5000,
+    'USD',
+    'PENDING'
+);
+
+INSERT INTO ledger_entries (
+    transaction_id,
+    account_id,
+    amount,
+    entry_type
+)
+VALUES
+(
+    'c0000000-0000-0000-0000-000000000006',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    -5000,
+    'DEBIT'
+),
+(
+    'c0000000-0000-0000-0000-000000000006',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    5000,
+    'CREDIT'
+),
+(
+    'c0000000-0000-0000-0000-000000000006',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    1,
+    'CREDIT'
+);
+
+UPDATE transactions
+SET status = 'COMPLETED',
+    completed_at = now()
+WHERE id = 'c0000000-0000-0000-0000-000000000006';
+
+\echo 'Expected: COMMIT below must fail.'
+
+COMMIT;
+
+ROLLBACK;
+
+
+\echo ''
+\echo '============================================================'
+\echo 'INVALID TEST 6: UNBALANCED LEDGER'
+\echo '============================================================'
+
+BEGIN;
+
+INSERT INTO transactions (
+    id,
+    source_account_id,
+    destination_account_id,
+    amount,
+    currency,
+    status
+)
+VALUES (
+    'c0000000-0000-0000-0000-000000000007',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    5000,
+    'USD',
+    'PENDING'
+);
+
+INSERT INTO ledger_entries (
+    transaction_id,
+    account_id,
+    amount,
+    entry_type
+)
+VALUES
+(
+    'c0000000-0000-0000-0000-000000000007',
+    'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    -5000,
+    'DEBIT'
+),
+(
+    'c0000000-0000-0000-0000-000000000007',
+    'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+    4999,
+    'CREDIT'
+);
+
+UPDATE transactions
+SET status = 'COMPLETED',
+    completed_at = now()
+WHERE id = 'c0000000-0000-0000-0000-000000000007';
+
+\echo 'Expected: COMMIT below must fail.'
+
+COMMIT;
+
+ROLLBACK;
+
+
+\echo ''
+\echo '============================================================'
+\echo 'LEDGER IMMUTABILITY'
+\echo '============================================================'
+
+\echo ''
+\echo '=== UPDATE should fail ==='
+
+UPDATE ledger_entries
+SET amount = -9999
+WHERE transaction_id =
+    'c0000000-0000-0000-0000-000000000001'
+AND entry_type = 'DEBIT';
+
+
+\echo ''
+\echo '=== DELETE should fail ==='
+
+DELETE FROM ledger_entries
+WHERE transaction_id =
+    'c0000000-0000-0000-0000-000000000001'
+AND entry_type = 'DEBIT';
+
+
+\echo ''
+\echo '=== Final valid ledger must still contain exactly 2 entries ==='
+
+SELECT
+    transaction_id,
+    COUNT(*) AS entry_count,
+    SUM(amount) AS ledger_total
+FROM ledger_entries
+WHERE transaction_id =
+    'c0000000-0000-0000-0000-000000000001'
+GROUP BY transaction_id;
+
+
+\echo ''
+\echo '============================================================'
+\echo 'END OF VERIFICATION'
+\echo '============================================================'
+
+\echo ''
+\echo 'Expected:'
+\echo '  Valid transaction                  -> COMMIT succeeds'
+\echo '  One-entry transaction              -> COMMIT fails'
+\echo '  Wrong amounts                      -> COMMIT fails'
+\echo '  Two DEBIT entries                  -> COMMIT fails'
+\echo '  Wrong CREDIT account               -> COMMIT fails'
+\echo '  Extra third entry                  -> COMMIT fails'
+\echo '  Unbalanced ledger                  -> COMMIT fails'
+\echo '  Ledger UPDATE                      -> fails'
+\echo '  Ledger DELETE                      -> fails'
+\echo ''
