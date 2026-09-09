@@ -50,6 +50,8 @@ describeDb("database migration strategy", () => {
         'ledger_entries_prevent_truncate',
         'audit_logs_prevent_update_delete',
         'audit_logs_prevent_truncate',
+        'transactions_validate_completed_ledger',
+        'ledger_entries_validate_completed_transaction',
         'transactions_validate_account_consistency'
       )
       ORDER BY tgname
@@ -60,7 +62,9 @@ describeDb("database migration strategy", () => {
       "audit_logs_prevent_update_delete",
       "ledger_entries_prevent_truncate",
       "ledger_entries_prevent_update_delete",
+      "ledger_entries_validate_completed_transaction",
       "transactions_validate_account_consistency",
+      "transactions_validate_completed_ledger",
     ]);
 
     const functions = await query<{ proname: string }>(`
@@ -69,6 +73,7 @@ describeDb("database migration strategy", () => {
       WHERE proname IN (
         'prevent_ledger_mutation',
         'prevent_audit_log_mutation',
+        'validate_completed_transaction_ledger',
         'validate_transaction_account_consistency'
       )
       ORDER BY proname
@@ -77,6 +82,7 @@ describeDb("database migration strategy", () => {
     expect(functions.map((row) => row.proname)).toEqual([
       "prevent_audit_log_mutation",
       "prevent_ledger_mutation",
+      "validate_completed_transaction_ledger",
       "validate_transaction_account_consistency",
     ]);
   });
