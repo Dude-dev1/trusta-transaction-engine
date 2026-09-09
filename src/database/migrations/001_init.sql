@@ -16,7 +16,7 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS "pgcrypto"; -- for generating random UUIDs
 
 -- Users table
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email           TEXT NOT NULL,
     password_hash   TEXT NOT NULL,
@@ -29,7 +29,7 @@ CREATE TABLE users (
 );
 
 -- Accounts table
-CREATE TABLE accounts (
+CREATE TABLE IF NOT EXISTS accounts (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id         UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     currency        CHAR(3) NOT NULL,
@@ -43,12 +43,12 @@ CREATE TABLE accounts (
     CONSTRAINT accounts_currency_format CHECK (currency ~ '^[A-Z]{3}$')
 );
 
-CREATE INDEX idx_accounts_user_id ON accounts(user_id);
-CREATE INDEX idx_accounts_status ON accounts(status);
-CREATE INDEX idx_accounts_user_currency ON accounts(user_id, currency);
+CREATE INDEX IF NOT EXISTS idx_accounts_user_id ON accounts(user_id);
+CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
+CREATE INDEX IF NOT EXISTS idx_accounts_user_currency ON accounts(user_id, currency);
 
 -- Transactions table (business-level financial operation)
-CREATE TABLE transactions (
+CREATE TABLE IF NOT EXISTS transactions (
     id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     source_account_id           UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
     destination_account_id      UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
@@ -65,13 +65,13 @@ CREATE TABLE transactions (
     CONSTRAINT transactions_currency_format CHECK (currency ~ '^[A-Z]{3}$')
 );
 
-CREATE INDEX idx_transactions_source_account ON transactions(source_account_id);
-CREATE INDEX idx_transactions_destination_account ON transactions(destination_account_id);
-CREATE INDEX idx_transactions_created_at ON transactions(created_at);
-CREATE INDEX idx_transactions_status ON transactions(status);
+CREATE INDEX IF NOT EXISTS idx_transactions_source_account ON transactions(source_account_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_destination_account ON transactions(destination_account_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at);
+CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status);
 
 -- Ledger entries (immutable, append-only, double-entry)
-CREATE TABLE ledger_entries (
+CREATE TABLE IF NOT EXISTS ledger_entries (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     transaction_id  UUID NOT NULL REFERENCES transactions(id) ON DELETE RESTRICT,
     account_id      UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
@@ -87,12 +87,12 @@ CREATE TABLE ledger_entries (
     )
 );
 
-CREATE INDEX idx_ledger_transaction_id ON ledger_entries(transaction_id);
-CREATE INDEX idx_ledger_account_id ON ledger_entries(account_id);
-CREATE INDEX idx_ledger_created_at ON ledger_entries(created_at);
+CREATE INDEX IF NOT EXISTS idx_ledger_transaction_id ON ledger_entries(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_account_id ON ledger_entries(account_id);
+CREATE INDEX IF NOT EXISTS idx_ledger_created_at ON ledger_entries(created_at);
 
 -- Idempotency keys table
-CREATE TABLE idempotency_keys (
+CREATE TABLE IF NOT EXISTS idempotency_keys (
     key             TEXT NOT NULL,
     user_id         UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     request_hash    TEXT NOT NULL,
@@ -106,7 +106,7 @@ CREATE TABLE idempotency_keys (
 );
 
 -- Audit logs (append-only, separate from application logs)
-CREATE TABLE audit_logs (
+CREATE TABLE IF NOT EXISTS audit_logs (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id         UUID REFERENCES users(id) ON DELETE RESTRICT,
     action          TEXT NOT NULL,
@@ -116,8 +116,8 @@ CREATE TABLE audit_logs (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_audit_user_id ON audit_logs(user_id);
-CREATE INDEX idx_audit_resource ON audit_logs(resource_type, resource_id);
-CREATE INDEX idx_audit_created_at ON audit_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_user_id ON audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit_logs(resource_type, resource_id);
+CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_logs(created_at);
 
 COMMIT;
